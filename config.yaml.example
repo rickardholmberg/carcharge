@@ -1,0 +1,46 @@
+epspot:
+  email: "you@example.com"
+  password: "your-epspot-password"
+  # Find your outlet_id by scanning the charger QR code or checking the Epspot app.
+  # It appears in the URL after scanning, e.g. "abc123xyz"
+  outlet_id: "YOUR_OUTLET_ID"
+
+mercedes:
+  email: "you@example.com"
+  password: "your-mercedes-me-password"
+  # Leave empty to auto-detect (uses your first vehicle).
+  # NOTE: MFA must be disabled on the Mercedes account.
+  vin: ""
+  region: "emea"  # emea | noam | china
+
+vehicle:
+  battery_capacity_kwh: 66.5  # EQB 300/350 usable capacity
+  charge_rate_kw: 11.0        # Your charger's output (7.4 for single-phase, 11 for 3-phase)
+  charging_efficiency: 0.90   # Typical AC charging efficiency (10% losses)
+
+charging:
+  target_soc_pct: 90          # Charge to this battery percentage
+  buffer_minutes: 20          # Extra margin added before departure time
+
+  # Departure schedule: carcharge calculates when to START so you hit
+  # target_soc_pct exactly at departure_time.
+  schedule:
+    - days: [mon, tue, wed, thu, fri]
+      depart_at: "07:30"
+    - days: [sat, sun]
+      depart_at: "10:00"
+
+autostart:
+  enabled: true
+  poll_interval_seconds: 30       # How often to check the charger state
+  gps_confirm_timeout_seconds: 300  # Max wait for GPS to confirm it's your car
+
+# GPS coordinates of your charger (used to identify your EQB via its location)
+charger_location:
+  lat: 59.3293
+  lon: 18.0686
+
+notifications:
+  # Optional: ntfy.sh topic for push alerts (install the ntfy app on your phone).
+  # Leave empty to disable notifications.
+  ntfy_topic: ""

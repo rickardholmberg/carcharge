@@ -1,0 +1,16 @@
+services:
+  carcharge:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Europe/Stockholm
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
