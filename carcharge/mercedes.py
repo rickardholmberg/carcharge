@@ -13,12 +13,14 @@ import re
 import secrets
 import time
 import urllib.parse
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import asyncio
 
 import aiohttp
+from yarl import URL
 
 log = logging.getLogger(__name__)
 
@@ -31,8 +33,8 @@ _REGIONS = {
         "widget": "https://widget.emea-prod.mobilesdk.mercedes-benz.com",
         "websocket": "wss://websocket.emea-prod.mobilesdk.mercedes-benz.com/v2/ws",
         "app_name": "mycar-store-ece",
-        "app_version": "1.65.1 (3174)",
-        "sdk_version": "4.4.2",
+        "app_version": "1.68.0 (3060)",
+        "sdk_version": "4.10.0",
         "user_agent": "Mercedes-Benz/3044 CFNetwork/3860.400.22 Darwin/25.3.0",
         "locale": "en-GB",
     },
@@ -43,8 +45,8 @@ _REGIONS = {
         "widget": "https://widget.amap-prod.mobilesdk.mercedes-benz.com",
         "websocket": "wss://websocket.amap-prod.mobilesdk.mercedes-benz.com/v2/ws",
         "app_name": "mycar-store-us",
-        "app_version": "3.65.1",
-        "sdk_version": "4.4.2",
+        "app_version": "3.67.0",
+        "sdk_version": "4.10.0",
         "user_agent": "Mercedes-Benz/3044 CFNetwork/3860.400.22 Darwin/25.3.0",
         "locale": "en-US",
     },
@@ -55,7 +57,7 @@ _REGIONS = {
         "widget": "https://widget.cn-prod.mobilesdk.mercedes-benz.com",
         "websocket": "wss://websocket.cn-prod.mobilesdk.mercedes-benz.com/v2/ws",
         "app_name": "mycar-store-cn",
-        "app_version": "1.65.0",
+        "app_version": "1.67.0",
         "sdk_version": "2.132.2",
         "user_agent": "MyStarCN/1.63.0 (com.daimler.ris.mercedesme.cn.ios; build:1758; iOS 16.3.1) Alamofire/5.4.0",
         "locale": "zh-CN",
@@ -65,6 +67,14 @@ _REGIONS = {
 REDIRECT_URI = "rismycar://login-callback"
 SCOPE = "email profile ciam-uid phone openid offline_access"
 TOKEN_FILE = Path("/data/mercedes_token.json")
+DEVICE_FILE = Path("/data/mercedes_device.json")
+SAFARI_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 15_8_3 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    "Version/15.6.6 Mobile/15E148 Safari/604.1"
+)
+# Avoid hammering CIAM after failed logins (Mercedes returns HTTP 429).
+AUTH_BACKOFF_SECONDS = 15 * 60
 
 
 def _pkce() -> tuple[str, str]:
@@ -75,6 +85,21 @@ def _pkce() -> tuple[str, str]:
         .decode()
     )
     return verifier, challenge
+
+
+def _load_or_create_device_id(path: Path = DEVICE_FILE) -> str:
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+            device_id = data.get("device_id")
+            if device_id:
+                return device_id
+        except Exception:
+            pass
+    device_id = str(uuid.uuid4())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"device_id": device_id}))
+    return device_id
 
 
 class MercedesClient:
@@ -93,9 +118,16 @@ class MercedesClient:
         self._token_file = token_file
         self._token: Optional[Dict] = None
         self._session: Optional[aiohttp.ClientSession] = None
+        self._device_id = _load_or_create_device_id()
+        self._auth_backoff_until = 0.0
 
     async def __aenter__(self):
-        self._session = aiohttp.ClientSession()
+        jar = aiohttp.CookieJar()
+        jar.update_cookies(
+            {"CIAM.DEVICE": self._device_id},
+            response_url=URL(self._cfg["auth"]),
+        )
+        self._session = aiohttp.ClientSession(cookie_jar=jar)
         self._load_token()
         return self
 
@@ -116,10 +148,36 @@ class MercedesClient:
         self._token_file.parent.mkdir(parents=True, exist_ok=True)
         self._token_file.write_text(json.dumps(self._token))
 
+    def _store_token(self, token: Dict[str, Any]) -> None:
+        """Persist token, keeping any existing refresh_token if omitted."""
+        if "refresh_token" not in token and self._token and "refresh_token" in self._token:
+            token["refresh_token"] = self._token["refresh_token"]
+        token["expires_at"] = time.time() + token.get("expires_in", 3600)
+        self._token = token
+        self._save_token()
+        self._auth_backoff_until = 0.0
+
     def _token_valid(self) -> bool:
         if not self._token:
             return False
         return time.time() < self._token.get("expires_at", 0) - 60
+
+    def _ciam_headers(self, *, html: bool = False) -> Dict[str, str]:
+        auth_base = self._cfg["auth"]
+        if html:
+            return {
+                "user-agent": SAFARI_UA,
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "accept-language": "de-DE,de;q=0.9",
+            }
+        return {
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/json",
+            "origin": auth_base,
+            "referer": f"{auth_base}/ciam/auth/login",
+            "accept-language": "de-DE,de;q=0.9",
+            "user-agent": SAFARI_UA,
+        }
 
     async def _refresh(self) -> bool:
         if not self._token or "refresh_token" not in self._token:
@@ -137,9 +195,7 @@ class MercedesClient:
                 if resp.status != 200:
                     return False
                 t = await resp.json()
-                t["expires_at"] = time.time() + t.get("expires_in", 3600)
-                self._token = t
-                self._save_token()
+                self._store_token(t)
                 return True
         except Exception as exc:
             log.warning("Token refresh failed: %s", exc)
@@ -149,10 +205,26 @@ class MercedesClient:
 
     async def authenticate(self) -> None:
         """OAuth2 PKCE login with username + password."""
+        now = time.time()
+        if now < self._auth_backoff_until:
+            remaining = int(self._auth_backoff_until - now)
+            raise RuntimeError(
+                f"Mercedes auth in backoff after recent failure ({remaining}s left)"
+            )
+
         verifier, challenge = _pkce()
         auth_base = self._cfg["auth"]
         app_id = self._cfg["app_id"]
 
+        try:
+            await self._authenticate_unlocked(verifier, challenge, auth_base, app_id)
+        except Exception:
+            self._auth_backoff_until = time.time() + AUTH_BACKOFF_SECONDS
+            raise
+
+    async def _authenticate_unlocked(
+        self, verifier: str, challenge: str, auth_base: str, app_id: str
+    ) -> None:
         # 1. GET authorization endpoint → follow redirects → resume is in final URL query string.
         # If an SSO session cookie is still active the server may skip the login form and redirect
         # directly to rismycar://login-callback?code=...; aiohttp raises InvalidURL for that scheme.
@@ -168,15 +240,7 @@ class MercedesClient:
                     "code_challenge": challenge,
                     "code_challenge_method": "S256",
                 },
-                headers={
-                    "user-agent": (
-                        "Mozilla/5.0 (iPhone; CPU iPhone OS 15_8_3 like Mac OS X) "
-                        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                        "Version/15.6.6 Mobile/15E148 Safari/604.1"
-                    ),
-                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "accept-language": "de-DE,de;q=0.9",
-                },
+                headers=self._ciam_headers(html=True),
                 allow_redirects=True,
             ) as resp:
                 final_url = str(resp.url)
@@ -195,24 +259,7 @@ class MercedesClient:
             if not code_m:
                 raise RuntimeError(f"No auth code in SSO redirect: {final_url!r}")
             log.info("Mercedes SSO fast-path — exchanging code directly")
-            async with self._session.post(
-                f"{auth_base}/as/token.oauth2",
-                data={
-                    "client_id": app_id,
-                    "code": code_m.group(1),
-                    "code_verifier": verifier,
-                    "grant_type": "authorization_code",
-                    "redirect_uri": REDIRECT_URI,
-                },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            ) as resp:
-                t = await resp.json()
-            if "access_token" not in t:
-                raise RuntimeError(f"Token exchange failed: {t}")
-            t["expires_at"] = time.time() + t.get("expires_in", 3600)
-            self._token = t
-            self._save_token()
-            log.info("Mercedes authentication successful")
+            await self._exchange_code(code_m.group(1), verifier, auth_base, app_id)
             return
 
         # resume=... lives in the query string of the redirected login page URL
@@ -227,19 +274,31 @@ class MercedesClient:
         # 2. Register browser UA (required by the IdP)
         await self._session.post(
             f"{auth_base}/ciam/auth/ua",
-            json={"browserName": "Safari", "browserVersion": "604.1", "osName": "iOS"},
+            json={
+                "browserName": "Mobile Safari",
+                "browserVersion": "15.6.6",
+                "osName": "iOS",
+            },
+            headers=self._ciam_headers(),
         )
 
         # 3. Submit username
         async with self._session.post(
             f"{auth_base}/ciam/auth/login/user",
             json={"username": self._email},
+            headers=self._ciam_headers(),
         ) as resp:
-            user_resp = await resp.json()
+            user_body = await resp.text()
+            if resp.status == 429:
+                raise RuntimeError(
+                    "Mercedes CIAM rate-limited username login (HTTP 429). "
+                    "Backing off before retry."
+                )
+            if resp.status >= 400:
+                raise RuntimeError(f"Mercedes username login failed ({resp.status}): {user_body}")
 
-        rid = user_resp.get("rid", "")
-
-        # 4. Submit password
+        # 4. Submit password (rid is client-generated; Mercedes may then offer a passkey prompt)
+        rid = secrets.token_urlsafe(24)
         async with self._session.post(
             f"{auth_base}/ciam/auth/login/pass",
             json={
@@ -248,8 +307,46 @@ class MercedesClient:
                 "rememberMe": False,
                 "rid": rid,
             },
+            headers=self._ciam_headers(),
         ) as resp:
-            pass_resp = await resp.json()
+            pass_body = await resp.text()
+            if resp.status == 429:
+                raise RuntimeError(
+                    "Mercedes CIAM rate-limited password login (HTTP 429). "
+                    "Backing off before retry."
+                )
+            if resp.status >= 400:
+                raise RuntimeError(f"Mercedes password login failed ({resp.status}): {pass_body}")
+            try:
+                pass_resp = json.loads(pass_body)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Mercedes password login returned non-JSON: {pass_body!r}") from exc
+
+        # 4b. Decline passkey setup prompt when offered (new CIAM behaviour)
+        if pass_resp.get("passkeyDemoEnabled"):
+            log.info("Mercedes passkey prompt detected — declining to continue password login")
+            async with self._session.post(
+                f"{auth_base}/ciam/auth/disablePasskeyDemo",
+                json={
+                    "username": self._email,
+                    "password": self._password,
+                    "rememberMe": False,
+                    "rid": rid,
+                    "disablePasskeyDemo": True,
+                },
+                headers=self._ciam_headers(),
+            ) as resp:
+                skip_body = await resp.text()
+                if resp.status >= 400:
+                    raise RuntimeError(
+                        f"Mercedes passkey prompt skip failed ({resp.status}): {skip_body}"
+                    )
+                try:
+                    pass_resp = json.loads(skip_body)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        f"Mercedes passkey skip returned non-JSON: {skip_body!r}"
+                    ) from exc
 
         result = pass_resp.get("result", "")
         pre_token = pass_resp.get("token", "")
@@ -260,14 +357,39 @@ class MercedesClient:
                 "Disable MFA (or create a separate account) to use carcharge."
             )
         if result not in ("RESUME2OIDCP", "GOTO_LOGIN_LEGAL_TEXTS"):
-            raise RuntimeError(f"Unexpected Mercedes auth result: {result!r}")
+            raise RuntimeError(
+                f"Unexpected Mercedes auth result: {result!r} (payload keys: {sorted(pass_resp)})"
+            )
 
         # 5. Accept legal consent if prompted (first-time login)
         if result == "GOTO_LOGIN_LEGAL_TEXTS":
-            await self._session.post(
+            async with self._session.post(
                 f"{auth_base}/ciam/auth/toas/saveLoginConsent",
-                json={"texts": {}, "homeCountry": "SE", "consentCountry": "SE"},
-            )
+                json={
+                    "texts": {},
+                    "homeCountry": pass_resp.get("homeCountry") or "SE",
+                    "consentCountry": pass_resp.get("consentCountry") or "SE",
+                },
+                headers=self._ciam_headers(),
+            ) as resp:
+                consent_body = await resp.text()
+                if resp.status >= 400:
+                    raise RuntimeError(
+                        f"Mercedes legal consent failed ({resp.status}): {consent_body}"
+                    )
+                try:
+                    consent_resp = json.loads(consent_body)
+                except json.JSONDecodeError:
+                    consent_resp = {}
+                if consent_resp.get("result") == "RESUME2OIDCP" and consent_resp.get("token"):
+                    pre_token = consent_resp["token"]
+                elif not pre_token:
+                    raise RuntimeError(
+                        f"Mercedes legal consent did not return a resume token: {consent_resp}"
+                    )
+
+        if not pre_token:
+            raise RuntimeError(f"Mercedes auth missing resume token after result {result!r}")
 
         # 6. Resume auth flow → POST form-encoded → redirects to rismycar://...?code=...
         resume_url = resume if resume.startswith("http") else f"{auth_base}{resume}"
@@ -276,7 +398,12 @@ class MercedesClient:
             async with self._session.post(
                 resume_url,
                 data=aiohttp.FormData({"token": pre_token}),
-                headers={"accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+                headers={
+                    **self._ciam_headers(html=True),
+                    "content-type": "application/x-www-form-urlencoded",
+                    "origin": auth_base,
+                    "referer": f"{auth_base}/ciam/auth/login",
+                },
                 allow_redirects=False,
             ) as resp:
                 location = resp.headers.get("Location", "")
@@ -289,11 +416,16 @@ class MercedesClient:
             raise RuntimeError(f"No auth code in redirect: {location!r}")
 
         # 7. Exchange code for tokens
+        await self._exchange_code(code_m.group(1), verifier, auth_base, app_id)
+
+    async def _exchange_code(
+        self, code: str, verifier: str, auth_base: str, app_id: str
+    ) -> None:
         async with self._session.post(
             f"{auth_base}/as/token.oauth2",
             data={
                 "client_id": app_id,
-                "code": code_m.group(1),
+                "code": code,
                 "code_verifier": verifier,
                 "grant_type": "authorization_code",
                 "redirect_uri": REDIRECT_URI,
@@ -305,10 +437,12 @@ class MercedesClient:
         if "access_token" not in t:
             raise RuntimeError(f"Token exchange failed: {t}")
 
-        t["expires_at"] = time.time() + t.get("expires_in", 3600)
-        self._token = t
-        self._save_token()
-        log.info("Mercedes authentication successful")
+        self._store_token(t)
+        has_refresh = "refresh_token" in self._token
+        log.info(
+            "Mercedes authentication successful (refresh_token=%s)",
+            "yes" if has_refresh else "no",
+        )
 
     async def ensure_auth(self) -> None:
         if self._token_valid():

@@ -302,6 +302,7 @@ class ChargingService:
             state.mercedes_ok = True
         except Exception as exc:
             log.warning("Mercedes refresh failed: %s", exc)
+            state.mercedes_ok = False
             state.last_error = str(exc)
 
     async def run(self) -> None:
