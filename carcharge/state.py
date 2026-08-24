@@ -38,6 +38,8 @@ class AppState:
     # ── Scheduler ─────────────────────────────────────────────────────────────
     next_departure: Optional[datetime] = None
     next_charge_start: Optional[datetime] = None
+    trip_pending: bool = False           # trip scheduled, holding basic until start_time
+    trip_pending_target: Optional[int] = None
     climate_prep_at: Optional[datetime] = None
     last_epspot_poll: Optional[datetime] = None
     last_error: Optional[str] = None

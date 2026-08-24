@@ -55,6 +55,18 @@ class ChargingService:
 
     # ── Scheduling helpers ────────────────────────────────────────────────────
 
+    def _departure_still_scheduled(self, depart: datetime) -> bool:
+        """True if this departure still exists in manual trips or the weekly schedule."""
+        if any(t["depart_at"] == depart for t in state.trips):
+            return True
+        name = _DAY[depart.weekday()]
+        for sched in self.cfg.charging.schedule:
+            if name in sched.days:
+                h, m = map(int, sched.depart_at.split(":"))
+                if depart.time() == time(h, m):
+                    return True
+        return False
+
     def _next_departure(self) -> Optional[datetime]:
         # Keep a trip active (so the car holds its trip target and keeps charging)
         # right up until departure — NOT a few minutes before, or the target would
@@ -72,7 +84,7 @@ class ChargingService:
                     depart = datetime.combine(day, time(h, m))
                     if depart > now:
                         candidates.append(depart)
-                        break  # one schedule entry per day is enough
+                        break  # one future schedule entry per day is enough
             if candidates:
                 break  # stop scanning once we have the earliest weekly hit
 
@@ -411,13 +423,14 @@ class ChargingService:
             # (a future departure that no longer exists); a departed trip stays
             # committed until unplug. Unplug also clears it (_handle_unplug).
             if (self._trip_committed is not None and self._trip_committed > now
-                    and not any(t["depart_at"] == self._trip_committed for t in state.trips)):
+                    and not self._departure_still_scheduled(self._trip_committed)):
                 self._trip_committed = None
                 self._committed_target = None
 
             effective_target = ch.basic_soc_pct
             start_time: Optional[datetime] = None
             paused_for_trip = False
+            trip_pending = False
             if self._trip_committed is not None:
                 # Committed: hold the trip target until unplug (keeps topping up
                 # any pre-conditioning draw; survives past departure).
@@ -435,8 +448,11 @@ class ChargingService:
                         self._committed_target = trip_target
                     else:
                         paused_for_trip = True  # hold basic until start_time
+                        trip_pending = True
             state.next_charge_start = start_time
             state.target_soc_pct = effective_target
+            state.trip_pending = trip_pending
+            state.trip_pending_target = self._trip_soc_for(dep) if trip_pending and dep else None
 
             # Keep the car's configured max-SoC equal to our intended target. Lowering
             # it below the current SoC stops the car immediately (a pause); raising it

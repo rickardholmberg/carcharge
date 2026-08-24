@@ -142,6 +142,8 @@ async def handle_status_json(request: web.Request) -> web.Response:
             "trip_soc_pct": state.trip_soc_pct,
             "target_soc_pct": state.target_soc_pct,
             "in_trip_mode": state.target_soc_pct == state.trip_soc_pct,
+            "trip_pending": state.trip_pending,
+            "trip_pending_target": state.trip_pending_target,
             "charge_starts": _fmt_dt(state.next_charge_start),
             "ready_by": _fmt_dt(state.next_departure),
             "est_done_if_charging_now": _est_done(state.mercedes_soc),
@@ -409,7 +411,9 @@ function render(d) {
 
   const modeBadge = sc.in_trip_mode
     ? `<span class="badge badge-trip">trip ${sc.trip_soc_pct}%</span>`
-    : `<span class="badge badge-basic">basic ${sc.basic_soc_pct}%</span>`;
+    : sc.trip_pending
+      ? `<span class="badge badge-trip">trip ${sc.trip_pending_target ?? sc.trip_soc_pct}% pending</span>`
+      : `<span class="badge badge-basic">basic ${sc.basic_soc_pct}%</span>`;
 
   const tripsHtml = (d.trips || []).map(t => `
     <div class="row">
@@ -449,8 +453,9 @@ function render(d) {
       <div class="card-title">Charging ${modeBadge}</div>
       ${row('Basic SoC', sc.basic_soc_pct + ' %')}
       ${row('Trip SoC', sc.trip_soc_pct + ' %')}
-      ${sc.in_trip_mode ? row('Trip starts', sc.charge_starts) : ''}
-      ${sc.in_trip_mode ? row('Ready by', sc.ready_by) : ''}
+      ${(sc.in_trip_mode || sc.trip_pending) ? row('Trip starts', sc.charge_starts) : ''}
+      ${(sc.in_trip_mode || sc.trip_pending) ? row('Ready by', sc.ready_by) : ''}
+      ${sc.trip_pending ? row('Hold at', sc.basic_soc_pct + ' % until then') : ''}
       ${row('Done if charging now', sc.est_done_if_charging_now)}
       ${row('Learned rate', sc.charge_rate_kw ? `${sc.charge_rate_kw} kW · ${sc.charge_samples} samples` : `${sc.charge_rate_kw_configured} kW (config)`)}
       ${sc.climate_prep_at ? row('Climate prep at', sc.climate_prep_at) : ''}
