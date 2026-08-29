@@ -12,7 +12,7 @@ from carcharge.mercedes import MercedesClient
 from carcharge.scheduler import ChargingService
 from carcharge.state import state
 from carcharge.trips import load_trips
-from carcharge.web import create_app
+from carcharge.web import create_app, web_base_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +27,9 @@ WEB_PORT = 8080
 
 async def main() -> None:
     log.info("carcharge starting")
+    base = web_base_path()
+    if base:
+        log.info("Web UI base path: %s", base)
     cfg = load_config(str(CONFIG_PATH))
 
     async with EpspotClient(cfg.epspot.email, cfg.epspot.password) as epspot:

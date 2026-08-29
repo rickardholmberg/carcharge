@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 import uuid
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -10,6 +11,20 @@ from aiohttp import web
 
 from .state import state
 from .trips import save_trips
+
+_web_base_path: Optional[str] = None
+
+
+def web_base_path() -> str:
+    """External URL prefix when served behind a reverse proxy (e.g. /carcharge)."""
+    global _web_base_path
+    if _web_base_path is None:
+        _web_base_path = os.environ.get("WEB_BASE_PATH", "").strip().rstrip("/")
+    return _web_base_path
+
+
+def _render_html(template: str) -> str:
+    return template.replace("__BASE__", web_base_path())
 
 
 def _distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -171,11 +186,11 @@ async def handle_status_json(request: web.Request) -> web.Response:
 
 
 async def handle_index(request: web.Request) -> web.Response:
-    return web.Response(text=_HTML, content_type="text/html")
+    return web.Response(text=_render_html(_HTML), content_type="text/html")
 
 
 async def handle_stats_page(request: web.Request) -> web.Response:
-    return web.Response(text=_STATS_HTML, content_type="text/html")
+    return web.Response(text=_render_html(_STATS_HTML), content_type="text/html")
 
 
 async def handle_trip_add(request: web.Request) -> web.Response:
@@ -322,20 +337,15 @@ _HTML = """<!DOCTYPE html>
   a.navlink:hover { text-decoration: underline; }
 </style>
 <script>
-// Set <base href> so relative fetch()/href work behind an nginx subpath.
-// Without this, /carcharge (no trailing slash) makes "api/status" resolve to /api/status.
-(function () {
-  let p = location.pathname;
-  if (p.endsWith('/stats')) p = p.slice(0, -5);
-  if (!p.endsWith('/')) p += '/';
-  const b = document.createElement('base');
-  b.href = p;
-  document.head.appendChild(b);
-})();
+function api(p) {
+  const base = '__BASE__';
+  const path = p.replace(/^\\//, '');
+  return base ? base + '/' + path : '/' + path;
+}
 </script>
 </head>
 <body>
-<h1>⚡ carcharge <span id="ts"></span><a href="stats" class="navlink">stats &amp; details →</a></h1>
+<h1>⚡ carcharge <span id="ts"></span><a href="__BASE__/stats" class="navlink">stats &amp; details →</a></h1>
 <div class="grid" id="grid">
   <div class="card"><div class="card-title">Loading…</div></div>
 </div>
@@ -358,7 +368,7 @@ function limitBadge(src) {
 
 async function refresh() {
   try {
-    const r = await fetch('api/status');
+    const r = await fetch(api('api/status'));
     if (!r.ok) throw new Error(`API ${r.status}`);
     const d = await r.json();
     render(d);
@@ -372,7 +382,7 @@ async function addTrip() {
   const inp = document.getElementById('trip-dt');
   const soc = parseInt(document.getElementById('trip-soc').value) || 90;
   if (!inp.value) return;
-  const r = await fetch('api/trips', {
+  const r = await fetch(api('api/trips'), {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({depart_at: inp.value, soc_pct: soc}),
@@ -381,7 +391,7 @@ async function addTrip() {
 }
 
 async function deleteTrip(id) {
-  await fetch('api/trips/' + id, {method: 'DELETE'});
+  await fetch(api('api/trips/' + id), {method: 'DELETE'});
   refresh();
 }
 
@@ -554,19 +564,15 @@ _STATS_HTML = """<!DOCTYPE html>
   .muted { color: var(--muted); }
 </style>
 <script>
-// Set <base href> so relative fetch()/href work behind an nginx subpath.
-(function () {
-  let p = location.pathname;
-  if (p.endsWith('/stats')) p = p.slice(0, -5);
-  if (!p.endsWith('/')) p += '/';
-  const b = document.createElement('base');
-  b.href = p;
-  document.head.appendChild(b);
-})();
+function api(p) {
+  const base = '__BASE__';
+  const path = p.replace(/^\\//, '');
+  return base ? base + '/' + path : '/' + path;
+}
 </script>
 </head>
 <body>
-<h1>📊 carcharge stats <a href="." class="navlink">← back</a></h1>
+<h1>📊 carcharge stats <a href="__BASE__/" class="navlink">← back</a></h1>
 <div class="sub">Learned charging model · auto-refreshes every 60 s</div>
 
 <div class="card">
@@ -606,7 +612,7 @@ function kwColor(kw) {
 }
 
 async function loadStats() {
-  const d = await (await fetch('api/stats')).json();
+  const d = await (await fetch(api('api/stats'))).json();
   // summary
   const fwd = d.forward_model_active;
   document.getElementById('summary').innerHTML =
@@ -664,7 +670,7 @@ async function loadStats() {
 }
 
 async function loadSpecial() {
-  const d = await (await fetch('api/special-days')).json();
+  const d = await (await fetch(api('api/special-days'))).json();
   const up = d.upcoming || [];
   let h = up.length ? '' : '<div class="row"><span class="muted" style="width:100%;text-align:center">None in the next 90 days</span></div>';
   for (const s of up) {
@@ -684,14 +690,14 @@ async function addSpecial() {
   const date = document.getElementById('sd-date').value;
   const label = document.getElementById('sd-label').value.trim() || 'special';
   if (!date) return;
-  const r = await fetch('api/special-days', {
+  const r = await fetch(api('api/special-days'), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({date, label}),
   });
   if (r.ok) { document.getElementById('sd-date').value=''; document.getElementById('sd-label').value=''; loadSpecial(); }
 }
 async function deleteSpecial(date) {
-  await fetch('api/special-days/' + date, {method: 'DELETE'});
+  await fetch(api('api/special-days/' + date), {method: 'DELETE'});
   loadSpecial();
 }
 
