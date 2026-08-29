@@ -196,4 +196,11 @@ class EpspotClient:
     async def stop_session(self, session_id: str) -> Dict[str, Any]:
         url = BASE_URL + f"infrastructure/user/session/{session_id}/stop"
         async with self._session.post(url, headers=self._headers()) as resp:
-            return await resp.json()
+            try:
+                data = await resp.json()
+            except Exception:
+                data = {"raw": await resp.text()}
+        if resp.status not in (200, 204):
+            raise RuntimeError(f"Stop session failed ({resp.status}): {data}")
+        log.info("Session stopped: id=%s (%s)", session_id, data)
+        return data

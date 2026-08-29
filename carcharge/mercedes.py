@@ -737,14 +737,33 @@ def _extract_ris_error(data: bytes) -> Optional[str]:
 
 
 def _parse_vep_update(data: bytes) -> Dict[str, Any]:
-    """Parse VEPUpdate protobuf bytes into a simple dict."""
+    """Parse vehicle attribute protobuf bytes into a simple dict.
+
+    The widget REST `/vehicleattributes` endpoint returns a VehicleStatusUpdate
+    (typed fields). Websocket push messages still use VEPUpdate (string-keyed
+    attributes map). Try REST format first, then fall back to VEPUpdate.
+    """
+    empty = {"soc": None, "lat": None, "lon": None, "charging": None}
     try:
         from carcharge.proto import vehicle_events_pb2
 
+        status = vehicle_events_pb2.VehicleStatusUpdate()
+        status.ParseFromString(data)
+        if status.HasField("soc") or status.HasField("position_lat") or status.HasField("chargingactive"):
+            result = dict(empty)
+            if status.HasField("soc"):
+                result["soc"] = float(status.soc.value)
+            if status.HasField("position_lat"):
+                result["lat"] = float(status.position_lat.value)
+            if status.HasField("position_long"):
+                result["lon"] = float(status.position_long.value)
+            if status.HasField("chargingactive"):
+                result["charging"] = bool(status.chargingactive.value)
+            return result
+
         update = vehicle_events_pb2.VEPUpdate()
         update.ParseFromString(data)
-
-        result: Dict[str, Any] = {"soc": None, "lat": None, "lon": None, "charging": None}
+        result = dict(empty)
         for key, attr in update.attributes.items():
             kind = attr.WhichOneof("attribute_type")
             if kind is None:
@@ -760,5 +779,5 @@ def _parse_vep_update(data: bytes) -> Dict[str, Any]:
                 result["charging"] = bool(val)
         return result
     except Exception as exc:
-        log.error("Failed to parse VEPUpdate protobuf: %s", exc)
-        return {"soc": None, "lat": None, "lon": None, "charging": None}
+        log.error("Failed to parse vehicle attributes protobuf: %s", exc)
+        return empty
