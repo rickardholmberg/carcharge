@@ -249,8 +249,22 @@ class ChargingService:
                     log.warning("Could not stop idle session %s: %s", sid, exc)
                 state.active_session_id = None
                 state.active_session_kwh = None
-            await self._start_smart_session(current_soc)
-            self._kick_session_until = now + timedelta(minutes=5)
+            last_err: Optional[Exception] = None
+            for attempt in range(6):
+                try:
+                    await self._start_smart_session(current_soc)
+                    self._kick_session_until = now + timedelta(minutes=5)
+                    return
+                except Exception as exc:
+                    last_err = exc
+                    busy = "409" in str(exc) or "busy" in str(exc).lower()
+                    if not busy or attempt == 5:
+                        break
+                    log.warning("Outlet busy starting session (attempt %d/6): %s", attempt + 1, exc)
+                    await asyncio.sleep(5)
+            self._kick_session_until = datetime.now() + timedelta(minutes=2)
+            if last_err:
+                log.error("Could not start charging session: %s", last_err)
 
     # ── Unplug handler ───────────────────────────────────────────────────────
 
