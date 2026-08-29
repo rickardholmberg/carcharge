@@ -438,9 +438,14 @@ class ChargingService:
             elif dep is not None:
                 trip_target = self._trip_soc_for(dep)
                 within_lookahead = (dep - now).total_seconds() <= ch.trip_lookahead_hours * 3600
-                if within_lookahead and soc is not None:
+                if within_lookahead:
                     # latest_start returns the deadline itself when already at target,
                     # so this also commits ~buffer before departure to hold/top up.
+                    # Unknown SoC → assume 0% so a trip still starts instead of
+                    # silently holding basic until Mercedes data arrives.
+                    if soc is None:
+                        log.warning("SoC unknown — assuming 0%% to schedule trip charge")
+                        soc = 0.0
                     start_time = self._start_time_for(soc, dep, trip_target)
                     if now >= start_time:
                         effective_target = trip_target
