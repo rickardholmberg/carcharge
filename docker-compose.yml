@@ -9,6 +9,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - TZ=Europe/Stockholm
+      # Required when served under an nginx subpath (no trailing slash):
+      # - WEB_BASE_PATH=/carcharge
     logging:
       driver: "json-file"
       options:
