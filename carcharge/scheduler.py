@@ -45,6 +45,8 @@ class ChargingService:
         self._trip_committed: Optional[datetime] = None  # departure we've started charging for
         self._committed_target: Optional[int] = None      # trip target held until unplug
         self._last_limit_source: Optional[str] = None
+        self._session_lock = asyncio.Lock()
+        self._kick_session_until: Optional[datetime] = None
         self.special_days = SpecialDays()
         state.special_days = self.special_days
         self.stats = ChargeStats(is_special=self.special_days.is_special_dt)
@@ -221,6 +223,35 @@ class ChargingService:
             if prep_at > datetime.now():
                 asyncio.ensure_future(self._schedule_climate_prep(prep_at))
 
+    async def _ensure_charging_session(self, current_soc: Optional[float]) -> None:
+        """Start a session if the outlet is plugged in but not delivering power.
+
+        An existing Epspot session can sit ACTIVE at 0 W after a basic-SoC stop
+        (energy limit reached, or the car paused at 80%). Raising the car target
+        does not resume that session — it has to be replaced.
+        """
+        if not state.outlet_plug_inserted:
+            return
+        async with self._session_lock:
+            now = datetime.now()
+            if self._kick_session_until and now < self._kick_session_until:
+                return
+            if not state.outlet_plug_inserted:
+                return
+            if (state.outlet_power_w or 0) >= 1400:
+                return
+            sid = state.active_session_id
+            if sid:
+                log.info("Stopping idle session %s so charging can resume", sid)
+                try:
+                    await self.epspot.stop_session(sid)
+                except Exception as exc:
+                    log.warning("Could not stop idle session %s: %s", sid, exc)
+                state.active_session_id = None
+                state.active_session_kwh = None
+            await self._start_smart_session(current_soc)
+            self._kick_session_until = now + timedelta(minutes=5)
+
     # ── Unplug handler ───────────────────────────────────────────────────────
 
     async def _handle_unplug(self) -> None:
@@ -275,11 +306,8 @@ class ChargingService:
                     log.warning("GPS/vehicle error during confirmation: %s", exc)
 
             if gps_ok:
-                if state.active_session_id:
-                    log.info("Plug-in confirmed but session %s already active", state.active_session_id)
-                    return
                 log.info("GPS confirmed: EQB at charger (soc=%.0f%%)", confirmed_soc or 0)
-                await self._start_smart_session(confirmed_soc)
+                await self._ensure_charging_session(confirmed_soc)
                 return
 
             await asyncio.sleep(60)
@@ -448,9 +476,12 @@ class ChargingService:
                         soc = 0.0
                     start_time = self._start_time_for(soc, dep, trip_target)
                     if now >= start_time:
+                        just_committed = self._trip_committed != dep
                         effective_target = trip_target
                         self._trip_committed = dep      # hold until unplug
                         self._committed_target = trip_target
+                        if just_committed:
+                            asyncio.ensure_future(self._ensure_charging_session(soc))
                     else:
                         paused_for_trip = True  # hold basic until start_time
                         trip_pending = True
