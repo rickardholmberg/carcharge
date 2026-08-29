@@ -323,13 +323,17 @@ _HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>⚡ carcharge <span id="ts"></span><a href="/stats" class="navlink">stats &amp; details →</a></h1>
+<h1>⚡ carcharge <span id="ts"></span><a href="stats" class="navlink">stats &amp; details →</a></h1>
 <div class="grid" id="grid">
   <div class="card"><div class="card-title">Loading…</div></div>
 </div>
 <div class="footer">Auto-refreshes every 30 s</div>
 
 <script>
+// Resolve paths relative to the current page so the UI works behind an nginx
+// subpath (e.g. /carcharge/) as well as on :8080 directly.
+const u = (path) => new URL(path, location.href).pathname;
+
 function row(label, val) {
   return `<div class="row"><span class="label">${label}</span><span class="val">${val ?? '—'}</span></div>`;
 }
@@ -346,7 +350,8 @@ function limitBadge(src) {
 
 async function refresh() {
   try {
-    const r = await fetch('/api/status');
+    const r = await fetch(u('api/status'));
+    if (!r.ok) throw new Error(`API ${r.status}`);
     const d = await r.json();
     render(d);
     document.getElementById('ts').textContent = new Date().toLocaleTimeString('sv-SE');
@@ -359,7 +364,7 @@ async function addTrip() {
   const inp = document.getElementById('trip-dt');
   const soc = parseInt(document.getElementById('trip-soc').value) || 90;
   if (!inp.value) return;
-  const r = await fetch('/api/trips', {
+  const r = await fetch(u('api/trips'), {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({depart_at: inp.value, soc_pct: soc}),
@@ -368,7 +373,7 @@ async function addTrip() {
 }
 
 async function deleteTrip(id) {
-  await fetch('/api/trips/' + id, {method: 'DELETE'});
+  await fetch(u('api/trips/' + id), {method: 'DELETE'});
   refresh();
 }
 
@@ -542,7 +547,7 @@ _STATS_HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>📊 carcharge stats <a href="/" class="navlink">← back</a></h1>
+<h1>📊 carcharge stats <a href=".." class="navlink">← back</a></h1>
 <div class="sub">Learned charging model · auto-refreshes every 60 s</div>
 
 <div class="card">
@@ -573,6 +578,7 @@ _STATS_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
+const u = (path) => new URL(path, location.href).pathname;
 const DAY_LABEL = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun','Special'];
 
 function kwColor(kw) {
@@ -582,7 +588,7 @@ function kwColor(kw) {
 }
 
 async function loadStats() {
-  const d = await (await fetch('/api/stats')).json();
+  const d = await (await fetch(u('api/stats'))).json();
   // summary
   const fwd = d.forward_model_active;
   document.getElementById('summary').innerHTML =
@@ -640,7 +646,7 @@ async function loadStats() {
 }
 
 async function loadSpecial() {
-  const d = await (await fetch('/api/special-days')).json();
+  const d = await (await fetch(u('api/special-days'))).json();
   const up = d.upcoming || [];
   let h = up.length ? '' : '<div class="row"><span class="muted" style="width:100%;text-align:center">None in the next 90 days</span></div>';
   for (const s of up) {
@@ -660,14 +666,14 @@ async function addSpecial() {
   const date = document.getElementById('sd-date').value;
   const label = document.getElementById('sd-label').value.trim() || 'special';
   if (!date) return;
-  const r = await fetch('/api/special-days', {
+  const r = await fetch(u('api/special-days'), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({date, label}),
   });
   if (r.ok) { document.getElementById('sd-date').value=''; document.getElementById('sd-label').value=''; loadSpecial(); }
 }
 async function deleteSpecial(date) {
-  await fetch('/api/special-days/' + date, {method: 'DELETE'});
+  await fetch(u('api/special-days/' + date), {method: 'DELETE'});
   loadSpecial();
 }
 
